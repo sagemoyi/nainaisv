@@ -1,0 +1,3 @@
+-keep class androidx.room.** { *; }
+-keep class com.xmoyi.nainaisv.data.** { *; }
+-dontwarn org.conscrypt.**
