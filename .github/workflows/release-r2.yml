@@ -41,7 +41,7 @@ jobs:
       RELEASE_VERSION_CODE: ${{ inputs.version_code }}
       RELEASE_NOTES: ${{ inputs.release_notes }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Validate release request and configuration
         env:
           CONFIRM_RELEASE: ${{ inputs.confirm_release }}
