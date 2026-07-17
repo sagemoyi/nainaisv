@@ -151,8 +151,8 @@ unset KEYSTORE_PASSWORD
 在仓库 Settings → Environments 中创建 `production`：
 
 - Deployment branches 只允许 `main`。
-- 公开仓库可以添加 required reviewer 或 wait timer，避免误点发布。
-- workflow 自身还会检查 `main`、生产确认框和并发锁，作为第二层保护。
+- 不配置 required reviewer 或 wait timer；工作流触发后无需再次人工审批。
+- workflow 会检查 `main`、生产确认框和并发锁，并校验固定签名证书及 R2 条件写入。
 
 在 `production` 环境中配置以下 Secrets。
 
@@ -200,7 +200,7 @@ ANDROID_SIGNING_CERT_SHA256
 
 - 保持默认 workflow 权限为只读；发布 workflow 自己也只申请 `contents: read`。
 - 只允许 GitHub 官方 Actions 和 `gradle/actions`，或者启用“要求完整 commit SHA”；仓库内 workflow 已固定所有 Action 的 commit SHA。
-- 不允许不受信任的协作者直接修改 `main` 上的 workflow 后立即发布。CI 稳定后可为 `main` 添加分支保护或 ruleset。
+- `main` 已要求通过 PR 和 `build` CI 合并，并禁止强推、删除和非线性历史。
 
 不要把 R2 或签名 Secrets 配到普通 PR 使用的 job。来自 fork 的 PR 默认也不会得到这些 Secrets。
 
