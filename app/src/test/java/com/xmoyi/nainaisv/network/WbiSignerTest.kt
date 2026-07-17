@@ -22,8 +22,8 @@ class WbiSignerTest {
         val url = signer.sign(
             baseUrl = "https://api.bilibili.com/x/space/wbi/arc/search",
             parameters = mapOf("foo" to "114", "bar" to "514", "baz" to "1919810"),
-            imageKey = "7cd084941338484aae1ad9425b84077c",
-            subKey = "4932caff0ff746eab6f01bf08b70ac45",
+            imageKey = "7cd084941338484aae1ad9425b84077c", // gitleaks:allow public WBI test vector
+            subKey = "4932caff0ff746eab6f01bf08b70ac45", // gitleaks:allow public WBI test vector
             timestampSeconds = 1_702_204_169,
         )
         assertEquals(

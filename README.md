@@ -1,8 +1,13 @@
 # 奶奶看剧
 
+[![Android CI](https://github.com/sagemoyi/nainaisv/actions/workflows/ci.yml/badge.svg)](https://github.com/sagemoyi/nainaisv/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 一个给家里老人使用的极简 Android AI 短剧播放器。应用直接播放 B 站公开免费视频，不需要 B 站账号；奶奶打开应用后会自动续播，播完自动换下一部，也可以像短视频应用一样上下滑动。
 
 > 这是家庭个人项目。它不下载、转存或重新分发视频，不绕过会员、付费和作者权限。B 站网页接口并非稳定的正式开放 API，接口变化时需要更新客户端。
+
+源码以 [MIT License](LICENSE) 公开，方便家庭自用、学习和改进。许可证只覆盖本仓库代码，不授予任何 B 站视频、作者作品、名称或第三方素材的权利。
 
 ## 已实现
 
@@ -34,8 +39,12 @@ sdk.dir=/path/to/Android/Sdk
 构建与测试：
 
 ```bash
-./gradlew testDebugUnitTest lintDebug assembleDebug
+./gradlew testDebugUnitTest
+./gradlew lintDebug assembleDebug
+./gradlew assembleRelease
 ```
+
+Release 构建在没有配置正式密钥时会生成未签名 APK，仅用于验证 R8 和资源压缩；可安装和发布的正式 APK 必须由下文的 GitHub Actions 使用固定密钥签名。
 
 调试 APK 位于：
 
@@ -69,6 +78,8 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## Cloudflare R2 发布
 
+GitHub 仓库公开后，源码和 CI 日志对所有人可见，但奶奶端检查更新和下载 APK 仍只走 `app.xmoyi.com`，不依赖 GitHub 登录或 GitHub Release。正式签名、R2 Token 和其他秘密值始终只保存在 GitHub `production` Environment Secrets 中。
+
 ### 1. 创建存储
 
 在 Cloudflare 创建 R2 Bucket：
@@ -85,6 +96,14 @@ app.xmoyi.com
 
 为 `nainaisv/stable/update.json` 创建绕过缓存规则。版本化 APK 可以长期缓存。
 
+不需要配置 CORS。自定义域名必须绑定到这个 Bucket 的根目录，并且 HTTPS 已经生效；发布前可以先检查：
+
+```bash
+curl -I https://app.xmoyi.com/
+```
+
+即使返回 `404` 也没关系，但 TLS 握手必须成功。
+
 最终目录：
 
 ```text
@@ -100,9 +119,42 @@ nainaisv/releases/nainaisv-1.0.0.apk
 - Access Key ID
 - Secret Access Key
 
-### 3. 配置 GitHub Secrets
+### 3. 创建唯一的正式签名密钥
 
-先把本项目提交并推送到你自己的 GitHub 仓库，然后在仓库 Settings → Secrets and variables → Actions 中配置以下 Secrets。
+只生成一次正式签名密钥：
+
+```bash
+keytool -genkeypair -v \
+  -keystore nainaisv-release.jks \
+  -alias nainaisv \
+  -keyalg RSA -keysize 4096 -validity 10000
+```
+
+把 keystore、alias 和两个密码保存在密码管理器及至少一份离线加密备份中。丢失或重新生成密钥后，旧安装将无法被新版本覆盖。
+
+计算不敏感的签名证书 SHA-256 指纹，后续 workflow 会用它阻止误用另一把密钥：
+
+```bash
+read -s KEYSTORE_PASSWORD
+export KEYSTORE_PASSWORD
+keytool -exportcert \
+  -keystore nainaisv-release.jks \
+  -alias nainaisv \
+  -storepass:env KEYSTORE_PASSWORD | sha256sum
+unset KEYSTORE_PASSWORD
+```
+
+记录输出的 64 位十六进制值，不包含文件名和空格。
+
+### 4. 配置 GitHub production 环境
+
+在仓库 Settings → Environments 中创建 `production`：
+
+- Deployment branches 只允许 `main`。
+- 公开仓库可以添加 required reviewer 或 wait timer，避免误点发布。
+- workflow 自身还会检查 `main`、生产确认框和并发锁，作为第二层保护。
+
+在 `production` 环境中配置以下 Secrets。
 
 Cloudflare：
 
@@ -122,28 +174,67 @@ SIGNING_KEY_ALIAS
 SIGNING_KEY_PASSWORD
 ```
 
-生成正式签名密钥示例：
+将 keystore 转成单行 Base64，复制结果到 `ANDROID_KEYSTORE_BASE64`：
 
 ```bash
-keytool -genkeypair -v \
-  -keystore nainaisv-release.jks \
-  -alias nainaisv \
-  -keyalg RSA -keysize 4096 -validity 10000
+base64 -w 0 nainaisv-release.jks
 ```
 
-将 keystore 转为单行 Base64 后保存到 `ANDROID_KEYSTORE_BASE64`。签名密钥不要提交到仓库，也不能丢失；后续版本必须使用同一密钥才能覆盖安装。
+macOS 可以使用：
 
-### 4. 发布
+```bash
+base64 < nainaisv-release.jks | tr -d '\n'
+```
 
-在 GitHub Actions 手动运行 `Release APK to Cloudflare R2`，填写递增的 `version_code`、版本名和更新说明。
+再在 `production` 环境的 Variables 中添加：
+
+```text
+ANDROID_SIGNING_CERT_SHA256
+```
+
+值为上一步记录的 64 位证书指纹。证书指纹不是密码，可以作为 Variable 保存。
+
+### 5. GitHub Actions 安全设置
+
+公开仓库建议在 Settings → Actions → General 中：
+
+- 保持默认 workflow 权限为只读；发布 workflow 自己也只申请 `contents: read`。
+- 只允许 GitHub 官方 Actions 和 `gradle/actions`，或者启用“要求完整 commit SHA”；仓库内 workflow 已固定所有 Action 的 commit SHA。
+- 不允许不受信任的协作者直接修改 `main` 上的 workflow 后立即发布。CI 稳定后可为 `main` 添加分支保护或 ruleset。
+
+不要把 R2 或签名 Secrets 配到普通 PR 使用的 job。来自 fork 的 PR 默认也不会得到这些 Secrets。
+
+在 Settings → Security 中启用 Private vulnerability reporting。安全问题按 [SECURITY.md](SECURITY.md) 私密报告，不要在公开 Issue 中粘贴凭据或完整设备日志。
+
+### 6. 首次发布
+
+先提交并推送本次发布流程到 `main`，确认 `Android CI` 通过。然后在 GitHub Actions 手动运行 `Release APK to Cloudflare R2`，分支选择 `main`，首次正式版填写：
+
+```text
+version_name: 1.0.0
+version_code: 1
+release_notes: 首个家庭使用版本
+confirm_release: 勾选
+```
+
+以后每次发布都必须使用新的三段式版本名，例如 `1.0.1`，并严格递增 `version_code`。同名 APK 永远不会被覆盖。
 
 工作流会：
 
 1. 运行单元测试。
-2. 构建并签名 release APK。
-3. 上传不可变的版本化 APK。
-4. 通过 R2 HeadObject 校验文件大小。
-5. 最后更新 `update.json`。
+2. 运行 Lint 并构建 Debug APK。
+3. 构建 Release APK，验证 APK 签名和固定证书指纹。
+4. 检查线上 `versionCode`，拒绝倒退或覆盖已有版本化 APK。
+5. 上传 APK，校验 R2 文件大小、SHA-256 元数据和公开下载地址。
+6. 最后更新 `update.json`，再从公开域名读取并核对清单内容。
+
+发布完成后，先在浏览器或命令行检查：
+
+```bash
+curl -fsS https://app.xmoyi.com/nainaisv/stable/update.json | jq .
+```
+
+再把首次正式 APK 从 R2 安装到真机。之后才能验证“同签名覆盖安装”；Debug 版带 `.debug` 包名，不能代替这项测试。
 
 应用不会自动请求更新清单。只有家属进入管理页并点击“检查更新”时才会访问：
 
@@ -152,6 +243,8 @@ https://app.xmoyi.com/nainaisv/stable/update.json
 ```
 
 Android 不允许普通应用静默更新。下载并校验完成后，仍需家属在系统安装界面确认；首次更新可能需要允许“安装未知应用”。
+
+若 workflow 在上传 `update.json` 之前失败，脚本会清理本次新上传的 APK，可以修复配置后重跑。若日志明确显示 `update.json` 已上传，但最后的公开域名校验失败，不要直接用相同版本重跑；先检查 R2 自定义域名和缓存规则，并确认线上清单是否已经是新版本。
 
 ## 内容与播放策略
 

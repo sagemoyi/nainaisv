@@ -1,0 +1,3 @@
+# Public Bilibili WBI test vectors introduced by the bootstrap commit.
+6cb514f53f9f5675a6042bfcaa3fb325a28cc717:app/src/test/java/com/xmoyi/nainaisv/network/WbiSignerTest.kt:generic-api-key:25
+6cb514f53f9f5675a6042bfcaa3fb325a28cc717:app/src/test/java/com/xmoyi/nainaisv/network/WbiSignerTest.kt:generic-api-key:26
