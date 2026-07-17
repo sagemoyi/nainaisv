@@ -129,8 +129,13 @@ jobs:
             exit 1
           fi
           "$apksigner_path" verify --verbose --print-certs "$apk_path" | tee "$RUNNER_TEMP/apksigner.txt"
-          actual_fingerprint="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt" | head -n 1 | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+          actual_fingerprint="$(sed -n 's/^.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt" | head -n 1 | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
           expected_fingerprint="$(printf '%s' "$ANDROID_SIGNING_CERT_SHA256" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "$actual_fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Unable to read the signing certificate SHA-256 from apksigner output" >&2
+            sed -n '/certificate SHA-256 digest:/p' "$RUNNER_TEMP/apksigner.txt" >&2
+            exit 1
+          fi
           if [[ "$actual_fingerprint" != "$expected_fingerprint" ]]; then
             echo "Signing certificate mismatch" >&2
             echo "Expected: $expected_fingerprint" >&2
