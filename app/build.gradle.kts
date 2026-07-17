@@ -5,6 +5,17 @@ plugins {
     id("org.jetbrains.kotlin.kapt")
 }
 
+val configuredVersionCode = providers.gradleProperty("VERSION_CODE").orNull?.let { rawValue ->
+    rawValue.toIntOrNull()?.takeIf { it in 1..2_100_000_000 }
+        ?: error("VERSION_CODE must be an integer between 1 and 2100000000")
+} ?: 1
+
+val configuredVersionName = providers.gradleProperty("VERSION_NAME").orNull?.also { value ->
+    require(Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matches(value)) {
+        "VERSION_NAME must use stable semantic version format, for example 1.2.3"
+    }
+} ?: "1.0.0"
+
 android {
     namespace = "com.xmoyi.nainaisv"
     compileSdk = 35
@@ -13,8 +24,8 @@ android {
         applicationId = "com.xmoyi.nainaisv"
         minSdk = 26
         targetSdk = 35
-        versionCode = providers.gradleProperty("VERSION_CODE").orNull?.toIntOrNull() ?: 1
-        versionName = providers.gradleProperty("VERSION_NAME").orNull ?: "1.0.0"
+        versionCode = configuredVersionCode
+        versionName = configuredVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -25,14 +36,21 @@ android {
         )
     }
 
-    val signingPath = System.getenv("SIGNING_STORE_FILE")
+    val signingPath = System.getenv("SIGNING_STORE_FILE")?.takeIf { it.isNotBlank() }
+    val signingStorePassword = System.getenv("SIGNING_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
+    val signingKeyAlias = System.getenv("SIGNING_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+    val signingKeyPassword = System.getenv("SIGNING_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
     if (!signingPath.isNullOrBlank()) {
+        requireNotNull(signingStorePassword) { "SIGNING_STORE_PASSWORD is required with SIGNING_STORE_FILE" }
+        requireNotNull(signingKeyAlias) { "SIGNING_KEY_ALIAS is required with SIGNING_STORE_FILE" }
+        requireNotNull(signingKeyPassword) { "SIGNING_KEY_PASSWORD is required with SIGNING_STORE_FILE" }
+        require(file(signingPath).isFile) { "SIGNING_STORE_FILE does not exist: $signingPath" }
         signingConfigs {
             create("release") {
                 storeFile = file(signingPath)
-                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
-                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
-                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
             }
         }
     }

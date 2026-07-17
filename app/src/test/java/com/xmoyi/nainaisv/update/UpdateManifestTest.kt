@@ -28,7 +28,28 @@ class UpdateManifestTest {
     @Test(expected = IllegalArgumentException::class)
     fun `rejects non https apk`() {
         UpdateManifest.parse(
-            """{"versionCode":2,"versionName":"1.1","apkUrl":"http://bad/apk","sha256":"${"a".repeat(64)}","size":1}""",
+            """{"versionCode":2,"versionName":"1.1.0","apkUrl":"http://app.xmoyi.com/nainaisv/releases/app.apk","sha256":"${"a".repeat(64)}","size":1}""",
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `rejects apk from another host`() {
+        UpdateManifest.parse(
+            """{"versionCode":2,"versionName":"1.1.0","apkUrl":"https://example.com/nainaisv/releases/app.apk","sha256":"${"a".repeat(64)}","size":1}""",
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `rejects non semantic version name`() {
+        UpdateManifest.parse(
+            """{"versionCode":2,"versionName":"release-2","apkUrl":"https://app.xmoyi.com/nainaisv/releases/app.apk","sha256":"${"a".repeat(64)}","size":1}""",
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `rejects semantic version with leading zero`() {
+        UpdateManifest.parse(
+            """{"versionCode":2,"versionName":"01.1.0","apkUrl":"https://app.xmoyi.com/nainaisv/releases/app.apk","sha256":"${"a".repeat(64)}","size":1}""",
         )
     }
 }

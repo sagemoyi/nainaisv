@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -43,7 +44,19 @@ data class UpdateManifest(
                 publishedAt = value.optString("publishedAt"),
                 releaseNotes = value.optString("releaseNotes"),
             ).also {
-                require(it.apkUrl.startsWith("https://")) { "更新地址必须使用 HTTPS" }
+                require(it.versionCode > 0) { "版本号无效" }
+                require(
+                    Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)")
+                        .matches(it.versionName),
+                ) {
+                    "版本名称格式无效"
+                }
+                val apkHttpUrl = it.apkUrl.toHttpUrlOrNull()
+                require(apkHttpUrl?.isHttps == true) { "更新地址必须使用 HTTPS" }
+                require(apkHttpUrl.host == "app.xmoyi.com") { "更新地址域名无效" }
+                require(apkHttpUrl.encodedPath.startsWith("/nainaisv/releases/")) {
+                    "更新地址路径无效"
+                }
                 require(it.sha256.matches(Regex("[0-9a-f]{64}"))) { "SHA-256 格式无效" }
                 require(it.size > 0) { "APK 大小无效" }
             }
