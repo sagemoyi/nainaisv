@@ -6,6 +6,8 @@ data class DramaItem(
     val cid: Long,
     val page: Int,
     val title: String,
+    val seriesKey: String,
+    val seriesTitle: String,
     val ownerMid: Long,
     val ownerName: String,
     val coverUrl: String,

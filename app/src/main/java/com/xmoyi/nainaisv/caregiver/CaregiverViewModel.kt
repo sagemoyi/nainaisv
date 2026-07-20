@@ -25,6 +25,7 @@ data class CaregiverUiState(
     val blockedTerms: String = "",
     val hasPin: Boolean = false,
     val busy: Boolean = false,
+    val syncing: Boolean = false,
     val message: String? = null,
     val updateState: UpdateState = UpdateState.Idle,
 )
@@ -58,21 +59,30 @@ class CaregiverViewModel(application: Application) : AndroidViewModel(applicatio
     fun search(keyword: String) = launchStringAction {
         require(keyword.isNotBlank()) { "请输入搜索词" }
         val count = repository.searchCandidates(keyword.trim())
-        "找到 $count 条候选内容"
+        if (count > 0) "找到 $count 条候选内容，请从下方挑选并信任作者" else "没有找到符合规则的内容，换个搜索词试试"
     }
 
     fun importLink(link: String) = launchStringAction { repository.importLink(link) }
 
-    fun trust(creator: CreatorEntity) = launchAction("已信任 ${creator.name}") {
-        repository.trustCreator(creator.mid, creator.name)
-    }
+    fun trust(creator: CreatorEntity) = trustByMid(creator.mid, creator.name)
 
-    fun trust(item: DramaEntity) = launchAction("已信任 ${item.ownerName}") {
-        repository.trustCreator(item.ownerMid, item.ownerName)
+    fun trust(item: DramaEntity) = trustByMid(item.ownerMid, item.ownerName)
+
+    private fun trustByMid(mid: Long, name: String) = launchAction("已信任 $name，正在后台同步作品") {
+        repository.trustCreator(mid, name)
+        syncInBackground(mid)
     }
 
     fun block(creator: CreatorEntity) = launchAction("已屏蔽 ${creator.name}") {
         repository.blockCreator(creator.mid)
+    }
+
+    fun block(item: DramaEntity) = launchAction("已屏蔽 ${item.ownerName}") {
+        repository.blockCreator(item.ownerMid)
+    }
+
+    fun unblock(creator: CreatorEntity) = launchAction("已解除屏蔽 ${creator.name}") {
+        repository.unblockCreator(creator.mid)
     }
 
     fun removeTrust(creator: CreatorEntity) = launchAction("已移出可信作者") {
@@ -90,7 +100,7 @@ class CaregiverViewModel(application: Application) : AndroidViewModel(applicatio
             val current = _state.value
             when {
                 !current.hasPin -> update { copy(message = "请先设置家属 PIN") }
-                current.trustedCreators.size < 3 -> update { copy(message = "请至少添加三个可信 UP 主") }
+                current.trustedCreators.isEmpty() -> update { copy(message = "请至少信任一位作者，奶奶才有内容可看") }
                 else -> {
                     settings.completeSetup()
                     onReady()
@@ -110,6 +120,22 @@ class CaregiverViewModel(application: Application) : AndroidViewModel(applicatio
     fun installUpdate(state: UpdateState.ReadyToInstall) = updates.install(state.file)
 
     fun clearMessage() = update { copy(message = null) }
+
+    private fun syncInBackground(mid: Long) {
+        viewModelScope.launch {
+            update { copy(syncing = true) }
+            runCatching { repository.syncCreator(mid, force = true) }
+                .onSuccess { count ->
+                    update {
+                        copy(
+                            syncing = false,
+                            message = if (count > 0) "同步完成，新增 $count 部作品" else message,
+                        )
+                    }
+                }
+                .onFailure { update { copy(syncing = false, message = "作品同步失败，稍后可点“刷新可信作者”重试") } }
+        }
+    }
 
     private fun launchAction(successMessage: String? = null, block: suspend () -> Unit) {
         viewModelScope.launch {

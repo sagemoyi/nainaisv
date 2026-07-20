@@ -1,6 +1,7 @@
 package com.xmoyi.nainaisv.data
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Embedded
@@ -13,11 +14,13 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(
     tableName = "dramas",
-    indices = [Index("ownerMid"), Index("bvid")],
+    indices = [Index("ownerMid"), Index("bvid"), Index("seriesKey")],
 )
 data class DramaEntity(
     @androidx.room.PrimaryKey val id: String,
@@ -25,6 +28,8 @@ data class DramaEntity(
     val cid: Long,
     val page: Int,
     val title: String,
+    @ColumnInfo(defaultValue = "") val seriesKey: String,
+    @ColumnInfo(defaultValue = "") val seriesTitle: String,
     val ownerMid: Long,
     val ownerName: String,
     val coverUrl: String,
@@ -114,6 +119,9 @@ interface DramaDao {
     @Query("UPDATE creators SET lastSyncAt = :time WHERE mid = :mid")
     suspend fun setCreatorSyncTime(mid: Long, time: Long)
 
+    @Query("SELECT COUNT(*) FROM dramas WHERE ownerMid = :mid AND playable = 1")
+    suspend fun countCreatorDramas(mid: Long): Int
+
     @Query("SELECT * FROM dramas WHERE ownerMid = :mid ORDER BY publishedAt DESC")
     fun observeCreatorDramas(mid: Long): Flow<List<DramaEntity>>
 
@@ -125,6 +133,9 @@ interface DramaDao {
 
     @Query("SELECT * FROM dramas WHERE bvid = :bvid ORDER BY page")
     suspend fun getByBvid(bvid: String): List<DramaEntity>
+
+    @Query("SELECT * FROM dramas WHERE seriesKey = :seriesKey AND playable = 1 ORDER BY page")
+    suspend fun getBySeries(seriesKey: String): List<DramaEntity>
 
     @Query("DELETE FROM dramas WHERE id = :id")
     suspend fun deleteDrama(id: String)
@@ -182,8 +193,8 @@ interface DramaDao {
 
 @Database(
     entities = [DramaEntity::class, CreatorEntity::class, WatchStateEntity::class],
-    version = 1,
-    exportSchema = false,
+    version = 2,
+    exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dramaDao(): DramaDao
@@ -191,12 +202,22 @@ abstract class AppDatabase : RoomDatabase() {
     companion object {
         @Volatile private var instance: AppDatabase? = null
 
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE dramas ADD COLUMN seriesKey TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE dramas ADD COLUMN seriesTitle TEXT NOT NULL DEFAULT ''")
+                db.execSQL("UPDATE dramas SET seriesKey = 'bv:' || bvid WHERE seriesKey = ''")
+                db.execSQL("UPDATE dramas SET seriesTitle = title WHERE seriesTitle = ''")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dramas_seriesKey ON dramas(seriesKey)")
+            }
+        }
+
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
                 "nainaisv.db",
-            ).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2).build().also { instance = it }
         }
     }
 }
@@ -207,6 +228,8 @@ fun DramaItem.toEntity(now: Long = System.currentTimeMillis()) = DramaEntity(
     cid = cid,
     page = page,
     title = title,
+    seriesKey = seriesKey,
+    seriesTitle = seriesTitle,
     ownerMid = ownerMid,
     ownerName = ownerName,
     coverUrl = coverUrl,
@@ -221,6 +244,6 @@ fun DramaItem.toEntity(now: Long = System.currentTimeMillis()) = DramaEntity(
 )
 
 fun DramaEntity.toModel() = DramaItem(
-    id, bvid, cid, page, title, ownerMid, ownerName, coverUrl, durationMs,
-    width, height, publishedAt, playable, candidate, score,
+    id, bvid, cid, page, title, seriesKey, seriesTitle, ownerMid, ownerName, coverUrl,
+    durationMs, width, height, publishedAt, playable, candidate, score,
 )

@@ -18,11 +18,13 @@ import org.json.JSONObject
 class BilibiliClient(
     private val http: OkHttpClient = defaultHttpClient(),
     private val signer: WbiSigner = WbiSigner(),
+    private val apiBase: String = API_BASE,
+    private val webBase: String = WEB_BASE,
 ) {
     @Volatile private var wbiKeys: WbiKeys? = null
 
     suspend fun search(keyword: String): List<SearchCandidate> = withContext(Dispatchers.IO) {
-        val url = "$API_BASE/x/web-interface/search/all/v2".toHttpUrl().newBuilder()
+        val url = "$apiBase/x/web-interface/search/all/v2".toHttpUrl().newBuilder()
             .addQueryParameter("keyword", keyword)
             .addQueryParameter("page", "1")
             .build()
@@ -68,7 +70,7 @@ class BilibiliClient(
                 "index" to "1",
             )
             val url = signer.sign(
-                "$API_BASE/x/space/wbi/arc/search",
+                "$apiBase/x/space/wbi/arc/search",
                 parameters,
                 keys.imageKey,
                 keys.subKey,
@@ -98,10 +100,10 @@ class BilibiliClient(
 
     suspend fun videoDetails(bvid: String, candidate: Boolean = false): VideoDetails =
         withContext(Dispatchers.IO) {
-            val url = "$API_BASE/x/web-interface/view".toHttpUrl().newBuilder()
+            val url = "$apiBase/x/web-interface/view".toHttpUrl().newBuilder()
                 .addQueryParameter("bvid", bvid)
                 .build()
-            val data = getJson(url.toString(), "$WEB_BASE/video/$bvid").dataObject()
+            val data = getJson(url.toString(), "$webBase/video/$bvid").dataObject()
             val owner = data.optJSONObject("owner") ?: JSONObject()
             val rights = data.optJSONObject("rights") ?: JSONObject()
             val restricted = rights.optInt("arc_pay") == 1 ||
@@ -119,9 +121,11 @@ class BilibiliClient(
             val commonMid = owner.optLong("mid")
             val commonName = owner.optString("name")
             val commonPubdate = data.optLong("pubdate") * 1000
+            val season = data.optJSONObject("ugc_season")
             val items = mutableListOf<DramaItem>()
 
             val pages = data.optJSONArray("pages") ?: JSONArray()
+            val multiPage = pages.length() > 1
             for (i in 0 until pages.length()) {
                 val page = pages.optJSONObject(i) ?: continue
                 val cid = page.optLong("cid")
@@ -133,7 +137,9 @@ class BilibiliClient(
                     bvid = bvid,
                     cid = cid,
                     page = page.optInt("page", i + 1),
-                    title = if (pages.length() > 1 && part.isNotBlank()) "$commonTitle · $part" else commonTitle,
+                    title = if (multiPage && part.isNotBlank()) part else commonTitle,
+                    seriesKey = "bv:$bvid",
+                    seriesTitle = commonTitle,
                     ownerMid = commonMid,
                     ownerName = commonName,
                     coverUrl = commonCover,
@@ -145,40 +151,51 @@ class BilibiliClient(
                     candidate = candidate,
                 )
             }
-            val sections = data.optJSONObject("ugc_season")?.optJSONArray("sections") ?: JSONArray()
-            for (sectionIndex in 0 until sections.length()) {
-                val episodes = sections.optJSONObject(sectionIndex)?.optJSONArray("episodes") ?: continue
-                for (episodeIndex in 0 until episodes.length()) {
-                    val episode = episodes.optJSONObject(episodeIndex) ?: continue
-                    val episodeBvid = episode.optString("bvid")
-                    val episodeCid = episode.optLong("cid")
-                    if (episodeBvid.isBlank() || episodeCid <= 0) continue
-                    val arc = episode.optJSONObject("arc") ?: JSONObject()
-                    val episodePage = episode.optJSONObject("page") ?: JSONObject()
-                    val dimension = episodePage.optJSONObject("dimension")
-                        ?: arc.optJSONObject("dimension")
-                        ?: defaultDimension
-                    items += DramaItem(
-                        id = "$episodeBvid:$episodeCid",
-                        bvid = episodeBvid,
-                        cid = episodeCid,
-                        page = episodeIndex + 1,
-                        title = episode.optString("title").ifBlank { arc.optString("title", commonTitle) },
-                        ownerMid = commonMid,
-                        ownerName = commonName,
-                        coverUrl = https(arc.optString("pic", commonCover)),
-                        durationMs = (episodePage.optLong("duration").takeIf { it > 0 }
-                            ?: arc.optLong("duration").takeIf { it > 0 }
-                            ?: 0) * 1000,
-                        width = dimension.optInt("width"),
-                        height = dimension.optInt("height"),
-                        publishedAt = arc.optLong("pubdate").takeIf { it > 0 }?.times(1000) ?: commonPubdate,
-                        playable = !restricted && arc.optInt("state", 0) >= 0,
-                        candidate = candidate,
-                    )
+            if (season != null) {
+                val seasonId = season.optLong("id")
+                val seasonTitle = season.optString("title").ifBlank { commonTitle }
+                val seriesKey = if (seasonId > 0) "season:$seasonId" else "bv:$bvid"
+                val sections = season.optJSONArray("sections") ?: JSONArray()
+                var episodeNumber = 0
+                for (sectionIndex in 0 until sections.length()) {
+                    val episodes = sections.optJSONObject(sectionIndex)?.optJSONArray("episodes") ?: continue
+                    for (episodeIndex in 0 until episodes.length()) {
+                        val episode = episodes.optJSONObject(episodeIndex) ?: continue
+                        val episodeBvid = episode.optString("bvid")
+                        val episodeCid = episode.optLong("cid")
+                        if (episodeBvid.isBlank() || episodeCid <= 0) continue
+                        episodeNumber += 1
+                        val arc = episode.optJSONObject("arc") ?: JSONObject()
+                        val episodePage = episode.optJSONObject("page") ?: JSONObject()
+                        val dimension = episodePage.optJSONObject("dimension")
+                            ?: arc.optJSONObject("dimension")
+                            ?: defaultDimension
+                        items += DramaItem(
+                            id = "$episodeBvid:$episodeCid",
+                            bvid = episodeBvid,
+                            cid = episodeCid,
+                            page = episodeNumber,
+                            title = episode.optString("title").ifBlank { arc.optString("title", commonTitle) },
+                            seriesKey = seriesKey,
+                            seriesTitle = seasonTitle,
+                            ownerMid = commonMid,
+                            ownerName = commonName,
+                            coverUrl = https(arc.optString("pic", commonCover)),
+                            durationMs = (episodePage.optLong("duration").takeIf { it > 0 }
+                                ?: arc.optLong("duration").takeIf { it > 0 }
+                                ?: 0) * 1000,
+                            width = dimension.optInt("width"),
+                            height = dimension.optInt("height"),
+                            publishedAt = arc.optLong("pubdate").takeIf { it > 0 }?.times(1000) ?: commonPubdate,
+                            playable = !restricted && arc.optInt("state", 0) >= 0,
+                            candidate = candidate,
+                        )
+                    }
                 }
             }
-            VideoDetails(items.distinctBy { it.id }, restricted)
+            // 同一视频既出现在自身分 P，又出现在合集里时，保留合集条目（带全局集数）。
+            val deduped = items.reversed().distinctBy { it.id }.reversed()
+            VideoDetails(deduped, restricted)
         }
 
     suspend fun playback(bvid: String, cid: Long, preferredQuality: Int = 64): PlaybackSource =
@@ -187,7 +204,7 @@ class BilibiliClient(
             var lastError: Throwable? = null
             for (quality in qualities) {
                 try {
-                    val url = "$API_BASE/x/player/playurl".toHttpUrl().newBuilder()
+                    val url = "$apiBase/x/player/playurl".toHttpUrl().newBuilder()
                         .addQueryParameter("bvid", bvid)
                         .addQueryParameter("cid", cid.toString())
                         .addQueryParameter("qn", quality.toString())
@@ -195,7 +212,7 @@ class BilibiliClient(
                         .addQueryParameter("fourk", "0")
                         .addQueryParameter("platform", "html5")
                         .build()
-                    val data = getJson(url.toString(), "$WEB_BASE/video/$bvid").dataObject()
+                    val data = getJson(url.toString(), "$webBase/video/$bvid").dataObject()
                     val durl = data.optJSONArray("durl") ?: JSONArray()
                     val urls = mutableListOf<String>()
                     val backups = mutableListOf<String>()
@@ -224,7 +241,7 @@ class BilibiliClient(
         }
 
     suspend fun creatorName(mid: Long): String = withContext(Dispatchers.IO) {
-        val url = "$API_BASE/x/space/wbi/acc/info"
+        val url = "$apiBase/x/space/wbi/acc/info"
         val keys = getWbiKeys()
         val signed = signer.sign(url, mapOf("mid" to mid.toString()), keys.imageKey, keys.subKey)
         getJson(signed, "https://space.bilibili.com/$mid").dataObject().optString("name", mid.toString())
@@ -235,8 +252,8 @@ class BilibiliClient(
         if (cached != null && cached.expiresAt > System.currentTimeMillis()) return cached
         return withContext(Dispatchers.IO) {
             val data = getJson(
-                "$API_BASE/x/web-interface/nav",
-                WEB_BASE,
+                "$apiBase/x/web-interface/nav",
+                webBase,
                 allowedCodes = setOf(0, -101),
             ).dataObject()
             val wbi = data.optJSONObject("wbi_img") ?: throw IOException("WBI key missing")

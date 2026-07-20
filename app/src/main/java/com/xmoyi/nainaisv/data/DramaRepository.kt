@@ -4,7 +4,13 @@ import com.xmoyi.nainaisv.network.BilibiliClient
 import com.xmoyi.nainaisv.recommendation.RecommendationEngine
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+
+/** 视频确认无法播放（下架、付费、被过滤），数据库中已标记；临时网络错误不用这个异常。 */
+class UnplayableDramaException(message: String) : IOException(message)
 
 class DramaRepository(
     private val dao: DramaDao,
@@ -17,6 +23,15 @@ class DramaRepository(
     val blockedCreators = dao.observeBlockedCreators()
     val candidates = dao.observeCandidates()
     val history = dao.observeHistoryWithDrama()
+
+    private val _contentVersion = MutableStateFlow(0L)
+
+    /** 家属改动内容（信任、屏蔽、导入、同步）后递增，奶奶模式据此刷新队列。 */
+    val contentVersion: StateFlow<Long> = _contentVersion.asStateFlow()
+
+    private fun bumpContentVersion() {
+        _contentVersion.value += 1
+    }
 
     suspend fun buildQueue(): List<DramaEntity> = recommendation.buildQueue(dao.getPlayableWithWatch())
 
@@ -35,31 +50,17 @@ class DramaRepository(
                 creator?.copy(name = item.ownerName.ifBlank { creator.name })
                     ?: CreatorEntity(item.ownerMid, item.ownerName),
             )
-            dao.upsertDrama(
-                DramaEntity(
-                    id = "${item.bvid}:0",
-                    bvid = item.bvid,
-                    cid = 0,
-                    page = 1,
-                    title = item.title,
-                    ownerMid = item.ownerMid,
-                    ownerName = item.ownerName,
-                    coverUrl = item.coverUrl,
-                    durationMs = item.durationMs,
-                    width = 0,
-                    height = 0,
-                    publishedAt = item.publishedAt,
-                    playable = true,
-                    candidate = creator?.trusted != true,
-                    score = recommendation.score(item.title, 0, 0, positive),
-                    updatedAt = now,
-                ),
-            )
+            // 已解析过的视频不再重建占位，避免和已有剧集条目重复。
+            if (dao.getByBvid(item.bvid).isEmpty()) {
+                dao.upsertDrama(placeholderEntity(item, creator, positive, now))
+            }
         }
         settings.setLastGlobalSearch(now)
+        if (accepted.isNotEmpty()) bumpContentVersion()
         return accepted.size
     }
 
+    /** 只写数据库，立即生效；作品同步由调用方在后台执行。 */
     suspend fun trustCreator(mid: Long, fallbackName: String = "") {
         val old = dao.getCreator(mid)
         val name = old?.name?.ifBlank { fallbackName } ?: fallbackName.ifBlank {
@@ -67,23 +68,35 @@ class DramaRepository(
         }
         dao.upsertCreator(CreatorEntity(mid, name, trusted = true, blocked = false, lastSyncAt = old?.lastSyncAt ?: 0))
         dao.approveCreatorDramas(mid)
-        syncCreator(mid, force = true)
+        bumpContentVersion()
     }
 
     suspend fun blockCreator(mid: Long) {
         val old = dao.getCreator(mid) ?: return
         dao.upsertCreator(old.copy(trusted = false, blocked = true))
+        bumpContentVersion()
+    }
+
+    suspend fun unblockCreator(mid: Long) {
+        val old = dao.getCreator(mid) ?: return
+        dao.upsertCreator(old.copy(blocked = false))
+        bumpContentVersion()
     }
 
     suspend fun untrustCreator(mid: Long) {
         val old = dao.getCreator(mid) ?: return
         dao.upsertCreator(old.copy(trusted = false))
+        bumpContentVersion()
     }
 
+    suspend fun creatorDramaCount(mid: Long): Int = dao.countCreatorDramas(mid)
+
     suspend fun refreshTrustedCreators(force: Boolean = false) {
+        var changed = 0
         dao.getTrustedCreators().forEach { creator ->
-            runCatching { syncCreator(creator.mid, force = force) }
+            runCatching { changed += syncCreator(creator.mid, force = force) }
         }
+        if (changed > 0) bumpContentVersion()
     }
 
     suspend fun autoDiscoverCandidates() {
@@ -102,8 +115,13 @@ class DramaRepository(
         val positive = terms(settings.positiveTerms.first())
         val blocked = terms(settings.blockedTerms.first())
         val uploads = bilibili.creatorUploads(mid, creator.name)
+        val known = uploads.mapNotNull { upload ->
+            dao.getByBvid(upload.bvid).firstOrNull()?.let { upload.bvid }
+        }.toSet()
         val entities = uploads.filter {
-            recommendation.isAllowed(it.title, blocked) && durationAllowed(it.title, it.durationMs)
+            it.bvid !in known &&
+                recommendation.isAllowed(it.title, blocked) &&
+                durationAllowed(it.title, it.durationMs)
         }.map { item ->
             DramaEntity(
                 id = "${item.bvid}:0",
@@ -111,6 +129,8 @@ class DramaRepository(
                 cid = 0,
                 page = 1,
                 title = item.title,
+                seriesKey = "bv:${item.bvid}",
+                seriesTitle = item.title,
                 ownerMid = mid,
                 ownerName = creator.name,
                 coverUrl = item.coverUrl,
@@ -125,6 +145,7 @@ class DramaRepository(
             )
         }
         dao.upsertDramas(entities)
+        if (entities.isNotEmpty()) bumpContentVersion()
         return entities.size
     }
 
@@ -136,6 +157,7 @@ class DramaRepository(
         val mid = SPACE_REGEX.find(link)?.groupValues?.getOrNull(1)?.toLongOrNull()
         if (mid != null) {
             trustCreator(mid)
+            runCatching { syncCreator(mid, force = true) }
             return "已添加可信作者"
         }
         val bvid = BVID_REGEX.find(link)?.value
@@ -163,18 +185,23 @@ class DramaRepository(
         dao.upsertDramas(allowed.map {
             it.copy(candidate = false, score = recommendation.score(it.title, it.width, it.height, positive)).toEntity()
         })
+        bumpContentVersion()
         runCatching { syncCreator(first.ownerMid, force = true) }
-        return "已添加《${first.title}》及作者 ${first.ownerName}"
+        return "已添加《${first.seriesTitle.ifBlank { first.title }}》及作者 ${first.ownerName}"
     }
 
-    suspend fun ensureResolved(entity: DramaEntity): DramaEntity {
-        if (entity.cid > 0) return entity
+    /**
+     * 占位条目（cid = 0）展开为完整剧集，按集数排序返回；已解析条目原样返回。
+     * 展开结果写入数据库并删除占位。
+     */
+    suspend fun ensureResolved(entity: DramaEntity): List<DramaEntity> {
+        if (entity.cid > 0) return listOf(entity)
         val positive = terms(settings.positiveTerms.first())
         val blocked = terms(settings.blockedTerms.first())
         val details = bilibili.videoDetails(entity.bvid, candidate = entity.candidate)
         if (details.paidOrRestricted || details.items.isEmpty()) {
             dao.markUnplayable(entity.id)
-            throw IOException("视频已失效或需要付费")
+            throw UnplayableDramaException("视频已失效或需要付费")
         }
         val resolved = details.items
             .filter {
@@ -184,17 +211,18 @@ class DramaRepository(
             .map { item ->
                 item.copy(score = recommendation.score(item.title, item.width, item.height, positive)).toEntity()
             }
+            .sortedBy { it.page }
         if (resolved.isEmpty()) {
             dao.markUnplayable(entity.id)
-            throw IOException("视频不符合内容规则")
+            throw UnplayableDramaException("视频不符合内容规则")
         }
         dao.upsertDramas(resolved)
         dao.deleteDrama(entity.id)
-        return resolved.first()
+        return resolved
     }
 
     suspend fun playback(entity: DramaEntity, quality: Int = 64): PlaybackSource {
-        val resolved = ensureResolved(entity)
+        val resolved = if (entity.cid > 0) entity else ensureResolved(entity).first()
         return bilibili.playback(resolved.bvid, resolved.cid, quality)
     }
 
@@ -224,6 +252,32 @@ class DramaRepository(
     }
 
     suspend fun markUnplayable(id: String) = dao.markUnplayable(id)
+
+    private fun placeholderEntity(
+        item: SearchCandidate,
+        creator: CreatorEntity?,
+        positive: List<String>,
+        now: Long,
+    ) = DramaEntity(
+        id = "${item.bvid}:0",
+        bvid = item.bvid,
+        cid = 0,
+        page = 1,
+        title = item.title,
+        seriesKey = "bv:${item.bvid}",
+        seriesTitle = item.title,
+        ownerMid = item.ownerMid,
+        ownerName = item.ownerName,
+        coverUrl = item.coverUrl,
+        durationMs = item.durationMs,
+        width = 0,
+        height = 0,
+        publishedAt = item.publishedAt,
+        playable = true,
+        candidate = creator?.trusted != true,
+        score = recommendation.score(item.title, 0, 0, positive),
+        updatedAt = now,
+    )
 
     private fun terms(value: String) = value.split(',', '，').map(String::trim).filter(String::isNotBlank)
 
