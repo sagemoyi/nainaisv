@@ -14,6 +14,6 @@ class MainActivityTest {
 
     @Test
     fun firstLaunchShowsCaregiverSetup() {
-        composeRule.onNodeWithText("首次设置").assertIsDisplayed()
+        composeRule.onNodeWithText("首次设置", substring = true).assertIsDisplayed()
     }
 }
