@@ -23,6 +23,9 @@ class RecommendationEngine {
                 compareByDescending<DramaWithWatch> { item ->
                     val watch = item.watch
                     watch == null || (!watch.completed && watch.completion < 0.8f)
+                }.thenByDescending { item ->
+                    // 奶奶连续快速滑走的内容往后放。
+                    (item.watch?.skipCount ?: 0) < 2
                 }.thenByDescending { it.drama.score }
                     .thenByDescending { it.drama.height > it.drama.width }
                     .thenBy { item ->

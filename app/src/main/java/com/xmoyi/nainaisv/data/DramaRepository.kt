@@ -66,7 +66,7 @@ class DramaRepository(
             runCatching { bilibili.creatorName(mid) }.getOrDefault(mid.toString())
         }
         dao.upsertCreator(CreatorEntity(mid, name, trusted = true, blocked = false, lastSyncAt = old?.lastSyncAt ?: 0))
-        dao.approveCreatorDramas(mid)
+        dao.setDramasCandidate(mid, false)
         syncCreator(mid, force = true)
     }
 
@@ -75,9 +75,16 @@ class DramaRepository(
         dao.upsertCreator(old.copy(trusted = false, blocked = true))
     }
 
+    suspend fun unblockCreator(mid: Long) {
+        val old = dao.getCreator(mid) ?: return
+        dao.upsertCreator(old.copy(trusted = false, blocked = false))
+        dao.setDramasCandidate(mid, true)
+    }
+
     suspend fun untrustCreator(mid: Long) {
         val old = dao.getCreator(mid) ?: return
         dao.upsertCreator(old.copy(trusted = false))
+        dao.setDramasCandidate(mid, true)
     }
 
     suspend fun refreshTrustedCreators(force: Boolean = false) {
@@ -167,8 +174,10 @@ class DramaRepository(
         return "已添加《${first.title}》及作者 ${first.ownerName}"
     }
 
-    suspend fun ensureResolved(entity: DramaEntity): DramaEntity {
-        if (entity.cid > 0) return entity
+    suspend fun ensureResolved(entity: DramaEntity): DramaEntity = ensureResolvedAll(entity).first()
+
+    suspend fun ensureResolvedAll(entity: DramaEntity): List<DramaEntity> {
+        if (entity.cid > 0) return listOf(entity)
         val positive = terms(settings.positiveTerms.first())
         val blocked = terms(settings.blockedTerms.first())
         val details = bilibili.videoDetails(entity.bvid, candidate = entity.candidate)
@@ -190,7 +199,7 @@ class DramaRepository(
         }
         dao.upsertDramas(resolved)
         dao.deleteDrama(entity.id)
-        return resolved.first()
+        return resolved
     }
 
     suspend fun playback(entity: DramaEntity, quality: Int = 64): PlaybackSource {
