@@ -117,7 +117,14 @@ interface DramaDao {
     @Query("SELECT * FROM dramas WHERE ownerMid = :mid ORDER BY publishedAt DESC")
     fun observeCreatorDramas(mid: Long): Flow<List<DramaEntity>>
 
-    @Query("SELECT * FROM dramas WHERE candidate = 1 AND playable = 1 ORDER BY score DESC, publishedAt DESC")
+    @Query(
+        """
+        SELECT d.* FROM dramas d
+        INNER JOIN creators c ON c.mid = d.ownerMid
+        WHERE d.candidate = 1 AND d.playable = 1 AND c.blocked = 0
+        ORDER BY d.score DESC, d.publishedAt DESC
+        """,
+    )
     fun observeCandidates(): Flow<List<DramaEntity>>
 
     @Query("SELECT * FROM dramas WHERE id = :id LIMIT 1")
@@ -132,8 +139,8 @@ interface DramaDao {
     @Query("UPDATE dramas SET playable = 0 WHERE id = :id")
     suspend fun markUnplayable(id: String)
 
-    @Query("UPDATE dramas SET candidate = 0 WHERE ownerMid = :mid")
-    suspend fun approveCreatorDramas(mid: Long)
+    @Query("UPDATE dramas SET candidate = :candidate WHERE ownerMid = :mid")
+    suspend fun setDramasCandidate(mid: Long, candidate: Boolean)
 
     @Transaction
     @Query(

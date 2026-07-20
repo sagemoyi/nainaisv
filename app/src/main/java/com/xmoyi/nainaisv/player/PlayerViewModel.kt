@@ -17,12 +17,14 @@ import com.xmoyi.nainaisv.data.DramaEntity
 import com.xmoyi.nainaisv.data.DramaRepository
 import com.xmoyi.nainaisv.data.SettingsStore
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class PlayerUiState(
@@ -34,7 +36,7 @@ data class PlayerUiState(
     val isBuffering: Boolean = false,
     val positionMs: Long = 0,
     val durationMs: Long = 0,
-    val errorMessage: String? = null,
+    val noticeMessage: String? = null,
     val loading: Boolean = true,
     val showHint: Boolean = false,
 )
@@ -50,10 +52,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private val slots = listOf(createSlot(), createSlot())
     private var activeSlot = 0
+    private var startJob: Job? = null
     private var loadJob: Job? = null
     private var preloadJob: Job? = null
+    private var recoveryJob: Job? = null
+    private var endedJob: Job? = null
     private val errorCounts = ConcurrentHashMap<String, Int>()
     private var lastProgressSave = 0L
+    private var pausedByUser = false
 
     init {
         slots.forEachIndexed { index, slot -> attachListener(index, slot) }
@@ -66,14 +72,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun start() {
-        if (!_state.value.loading && _state.value.queue.isNotEmpty()) return
-        viewModelScope.launch {
-            val hintSeen = settings.hintSeen.first()
-            var queue = repository.buildQueue()
-            if (queue.isEmpty()) {
-                repository.refreshTrustedCreators()
-                queue = repository.buildQueue()
+        if (startJob?.isActive == true) return
+        startJob = viewModelScope.launch {
+            if (_state.value.queue.isNotEmpty()) {
+                // 从家属管理返回：本地队列静默刷新，正在播放的内容不中断。
+                refreshQueuePreservingPlayback()
+                return@launch
             }
+            val hintSeen = settings.hintSeen.first()
+            val queue = awaitQueue()
+            if (!isActive) return@launch
             val lastId = settings.lastDramaId.first()
             val startIndex = queue.indexOfFirst { it.id == lastId }.takeIf { it >= 0 } ?: 0
             _state.value = _state.value.copy(
@@ -82,7 +90,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 loading = false,
                 showHint = !hintSeen,
             )
-            if (queue.isNotEmpty()) playAt(startIndex, savePrevious = false)
+            playAt(startIndex, savePrevious = false)
             launch { repository.autoDiscoverCandidates() }
         }
     }
@@ -101,11 +109,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 saveCurrentNow(false)
                 var refreshed = repository.buildQueue()
                 if (refreshed.isEmpty()) {
-                    repository.refreshTrustedCreators()
+                    runCatching { repository.refreshTrustedCreators() }
                     refreshed = repository.buildQueue()
                 }
-                _state.value = _state.value.copy(queue = refreshed)
-                if (refreshed.isNotEmpty()) playAt(0, savePrevious = false)
+                if (refreshed.isNotEmpty()) {
+                    _state.value = _state.value.copy(queue = refreshed)
+                    playAt(0, savePrevious = false)
+                }
             }
         } else {
             playAt(next, savePrevious = true)
@@ -119,7 +129,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun togglePlayback() {
         val player = slots[activeSlot].player
-        if (player.isPlaying) player.pause() else player.play()
+        if (player.isPlaying) {
+            player.pause()
+            pausedByUser = true
+        } else {
+            player.play()
+            pausedByUser = false
+        }
     }
 
     fun pause() {
@@ -128,18 +144,37 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun resume() {
-        if (_state.value.current != null) slots[activeSlot].player.play()
-    }
-
-    fun retry() {
-        val current = _state.value.current ?: return
-        errorCounts[current.id] = 0
-        playAt(_state.value.currentIndex, savePrevious = false, forceReload = true)
+        if (_state.value.current != null && !pausedByUser) slots[activeSlot].player.play()
     }
 
     fun dismissHint() {
         _state.value = _state.value.copy(showHint = false)
         viewModelScope.launch { settings.setHintSeen() }
+    }
+
+    /** 启动或恢复时等待本地队列；没有网络时按退避策略持续重试，不让奶奶卡在空白页。 */
+    private suspend fun awaitQueue(): List<DramaEntity> {
+        var attempt = 0
+        while (true) {
+            var queue = repository.buildQueue()
+            if (queue.isEmpty()) {
+                runCatching { repository.refreshTrustedCreators() }
+                queue = repository.buildQueue()
+            }
+            if (queue.isNotEmpty()) return queue
+            attempt++
+            delay(minOf(5_000L * (1L shl (attempt - 1).coerceAtMost(4)), 60_000L))
+        }
+    }
+
+    private suspend fun refreshQueuePreservingPlayback() {
+        val refreshed = repository.buildQueue()
+        if (refreshed.isEmpty()) return
+        val currentId = slots[activeSlot].drama?.id ?: return
+        val newIndex = refreshed.indexOfFirst { it.id == currentId }
+        if (newIndex >= 0) {
+            _state.value = _state.value.copy(queue = refreshed, currentIndex = newIndex)
+        }
     }
 
     private fun playAt(
@@ -151,11 +186,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val queue = _state.value.queue
         if (index !in queue.indices) return
         loadJob?.cancel()
+        preloadJob?.cancel()
+        recoveryJob?.cancel()
+        endedJob?.cancel()
         if (savePrevious) saveCurrent(skipped = slots[activeSlot].player.currentPosition < 15_000)
         loadJob = viewModelScope.launch {
             _state.value = _state.value.copy(
                 currentIndex = index,
-                errorMessage = null,
+                noticeMessage = null,
                 isBuffering = true,
             )
             val preloaded = slots.indexOfFirst { it.queueIndex == index && it.ready }
@@ -166,11 +204,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
             val targetSlot = if (activeSlot == 0) 1 else 0
             val prepared = prepareSlot(targetSlot, index, playWhenReady = true, preferredQuality)
+            if (!isActive) return@launch
             if (prepared) {
                 switchTo(targetSlot, index)
                 preload(index + 1)
             } else {
-                handlePermanentFailure(queue[index], "这个故事暂时播不了")
+                val failed = _state.value.queue.getOrNull(index)
+                if (failed != null) {
+                    handlePermanentFailure(failed, "这个故事暂时播不了，马上换一个")
+                }
             }
         }
     }
@@ -181,15 +223,23 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playWhenReady: Boolean,
         preferredQuality: Int = 64,
     ): Boolean {
-        val queue = _state.value.queue
-        val original = queue.getOrNull(queueIndex) ?: return false
+        val original = _state.value.queue.getOrNull(queueIndex) ?: return false
         val slot = slots[slotIndex]
         slot.ready = false
         slot.queueIndex = -1
         slot.player.stop()
         slot.player.clearMediaItems()
-        return runCatching {
-            val resolved = repository.ensureResolved(original)
+        val resolvedItems = try {
+            repository.ensureResolvedAll(original)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            return false
+        }
+        // 占位展开成多 P / 合集后，把全部剧集插进队列，奶奶可以连着看。
+        spliceIntoQueue(original, queueIndex, resolvedItems)
+        val resolved = resolvedItems.first()
+        return try {
             val source = repository.playback(resolved, preferredQuality)
             slot.dataSourceFactory.setDefaultRequestProperties(source.headers)
             slot.player.setMediaItems(source.urls.map { MediaItem.fromUri(it) })
@@ -200,10 +250,27 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             slot.queueIndex = queueIndex
             slot.drama = resolved
             slot.ready = true
-            val updatedQueue = _state.value.queue.toMutableList().apply { set(queueIndex, resolved) }
-            _state.value = _state.value.copy(queue = updatedQueue)
             true
-        }.getOrElse { false }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            false
+        }
+    }
+
+    private fun spliceIntoQueue(original: DramaEntity, queueIndex: Int, resolvedItems: List<DramaEntity>) {
+        val current = _state.value.queue
+        val at = if (current.getOrNull(queueIndex)?.id == original.id) {
+            queueIndex
+        } else {
+            current.indexOfFirst { it.id == original.id }
+        }
+        if (at < 0) return
+        val updated = current.toMutableList().apply {
+            removeAt(at)
+            addAll(at, resolvedItems)
+        }
+        _state.value = _state.value.copy(queue = updated)
     }
 
     private fun switchTo(slotIndex: Int, queueIndex: Int) {
@@ -212,13 +279,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val slot = slots[activeSlot]
         slot.player.playWhenReady = true
         slot.player.play()
+        slot.drama?.let { errorCounts.remove(it.id) }
+        pausedByUser = false
         _state.value = _state.value.copy(
             currentIndex = queueIndex,
             current = slot.drama,
             player = slot.player,
             isBuffering = slot.player.playbackState == Player.STATE_BUFFERING,
             isPlaying = slot.player.isPlaying,
-            errorMessage = null,
+            noticeMessage = null,
         )
     }
 
@@ -240,7 +309,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 _state.value = _state.value.copy(isBuffering = playbackState == Player.STATE_BUFFERING)
                 if (playbackState == Player.STATE_ENDED) {
                     saveCurrent(false)
-                    viewModelScope.launch {
+                    endedJob?.cancel()
+                    endedJob = viewModelScope.launch {
                         delay(1_000)
                         next()
                     }
@@ -267,17 +337,32 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun handlePermanentFailure(drama: DramaEntity, message: String) {
-        _state.value = _state.value.copy(errorMessage = message, isBuffering = false)
-        viewModelScope.launch {
+        recoveryJob?.cancel()
+        _state.value = _state.value.copy(noticeMessage = message, isBuffering = false)
+        recoveryJob = viewModelScope.launch {
             repository.markUnplayable(drama.id)
             delay(1_500)
             var queue = repository.buildQueue()
             if (queue.isEmpty()) {
-                repository.refreshTrustedCreators()
+                runCatching { repository.refreshTrustedCreators() }
                 queue = repository.buildQueue()
             }
-            _state.value = _state.value.copy(queue = queue, errorMessage = null)
-            if (queue.isNotEmpty()) playAt(_state.value.currentIndex.coerceAtMost(queue.lastIndex), false)
+            if (!isActive) return@launch
+            if (queue.isNotEmpty()) {
+                _state.value = _state.value.copy(queue = queue, noticeMessage = null)
+                playAt(_state.value.currentIndex.coerceAtMost(queue.lastIndex), savePrevious = false)
+            } else {
+                _state.value = _state.value.copy(
+                    queue = emptyList(),
+                    current = null,
+                    loading = true,
+                    noticeMessage = null,
+                )
+                val fresh = awaitQueue()
+                if (!isActive) return@launch
+                _state.value = _state.value.copy(queue = fresh, loading = false)
+                playAt(0, savePrevious = false)
+            }
         }
     }
 
