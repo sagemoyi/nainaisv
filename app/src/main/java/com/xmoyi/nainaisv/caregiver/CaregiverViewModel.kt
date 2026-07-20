@@ -75,6 +75,10 @@ class CaregiverViewModel(application: Application) : AndroidViewModel(applicatio
         repository.blockCreator(creator.mid)
     }
 
+    fun unblock(creator: CreatorEntity) = launchAction("已取消屏蔽 ${creator.name}") {
+        repository.unblockCreator(creator.mid)
+    }
+
     fun removeTrust(creator: CreatorEntity) = launchAction("已移出可信作者") {
         repository.untrustCreator(creator.mid)
     }

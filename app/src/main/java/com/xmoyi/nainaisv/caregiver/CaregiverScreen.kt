@@ -150,6 +150,18 @@ fun CaregiverScreen(
             if (state.candidates.isEmpty()) Text("还没有候选内容。可以搜索或粘贴链接。")
             state.candidates.take(20).forEach { item -> CandidateCard(item, viewModel::trust) }
 
+            if (state.candidateCreators.isNotEmpty()) {
+                SectionTitle("候选作者")
+                state.candidateCreators.forEach { creator ->
+                    CreatorCard(
+                        creator = creator,
+                        primaryLabel = "信任",
+                        onPrimary = { viewModel.trust(creator) },
+                        onBlock = { viewModel.block(creator) },
+                    )
+                }
+            }
+
             HorizontalDivider()
             SectionTitle("可信作者（${state.trustedCreators.size}/3 起）")
             if (state.trustedCreators.isEmpty()) Text("尚未添加可信作者。")
@@ -164,7 +176,19 @@ fun CaregiverScreen(
 
             if (state.blockedCreators.isNotEmpty()) {
                 SectionTitle("已屏蔽作者")
-                state.blockedCreators.forEach { Text("• ${it.name} (${it.mid})") }
+                state.blockedCreators.forEach { creator ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(creator.name, style = MaterialTheme.typography.titleMedium)
+                            Text("UID ${creator.mid}", style = MaterialTheme.typography.bodySmall)
+                        }
+                        OutlinedButton(onClick = { viewModel.unblock(creator) }) { Text("取消屏蔽") }
+                    }
+                }
             }
 
             HorizontalDivider()
