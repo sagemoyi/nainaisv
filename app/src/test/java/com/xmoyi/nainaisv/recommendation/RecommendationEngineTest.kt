@@ -33,6 +33,22 @@ class RecommendationEngineTest {
         assertEquals(listOf("new", "old"), queue.map { it.id })
     }
 
+    @Test
+    fun `demotes repeatedly skipped stories`() {
+        val skipped = drama("skipped", score = 90, width = 1080, height = 1920)
+        val kept = drama("kept", score = 10, width = 1080, height = 1920)
+        val queue = engine.buildQueue(
+            listOf(
+                DramaWithWatch(
+                    skipped,
+                    WatchStateEntity(skipped.id, skipCount = 3, completion = 0.1f, lastWatchedAt = 100),
+                ),
+                DramaWithWatch(kept, null),
+            ),
+        )
+        assertEquals(listOf("kept", "skipped"), queue.map { it.id })
+    }
+
     private fun drama(id: String, score: Int, width: Int, height: Int) = DramaEntity(
         id = id,
         bvid = "BV1234567890",
