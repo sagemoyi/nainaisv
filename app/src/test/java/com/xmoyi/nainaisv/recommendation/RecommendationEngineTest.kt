@@ -82,6 +82,38 @@ class RecommendationEngineTest {
     }
 
     @Test
+    fun `repeatedly skipped series drops behind fresh series`() {
+        val skipped = drama("skipped:1", series = "s:skipped", page = 1, score = 90)
+        val fresh = drama("fresh:1", series = "s:fresh", page = 1, score = 10)
+        val queue = engine.buildQueue(
+            listOf(
+                DramaWithWatch(
+                    skipped,
+                    WatchStateEntity(skipped.id, completion = 0.05f, skipCount = 2, lastWatchedAt = 100),
+                ),
+                DramaWithWatch(fresh, null),
+            ),
+        )
+        assertEquals(listOf("fresh:1", "skipped:1"), queue.map { it.id })
+    }
+
+    @Test
+    fun `series with real progress stays first even after one skip`() {
+        val watching = drama("watching:1", series = "s:watching", page = 1, score = 10)
+        val fresh = drama("fresh:1", series = "s:fresh", page = 1, score = 90)
+        val queue = engine.buildQueue(
+            listOf(
+                DramaWithWatch(
+                    watching,
+                    WatchStateEntity(watching.id, completion = 0.4f, skipCount = 1, lastWatchedAt = 100),
+                ),
+                DramaWithWatch(fresh, null),
+            ),
+        )
+        assertEquals(listOf("watching:1", "fresh:1"), queue.map { it.id })
+    }
+
+    @Test
     fun `blank series key falls back to bvid`() {
         val queue = engine.buildQueue(
             listOf(

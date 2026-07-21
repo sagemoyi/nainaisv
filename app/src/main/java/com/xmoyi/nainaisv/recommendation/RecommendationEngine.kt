@@ -20,7 +20,8 @@ class RecommendationEngine {
      * 播的是下一集而不是别的剧。剧集之间的顺序：
      * 1. 看了一半的剧排最前（最近看的优先），奶奶打开就能接着看；
      * 2. 没看过的剧按推荐分和发布时间排后面；
-     * 3. 全部看完的剧排最后（最久没看的优先，可以循环重看）。
+     * 3. 只被快速滑走过、没真正看进去的剧排在新剧后面，不再反复顶到前排；
+     * 4. 全部看完的剧排最后（最久没看的优先，可以循环重看）。
      */
     fun buildQueue(items: List<DramaWithWatch>): List<DramaEntity> {
         val series = items
@@ -32,6 +33,9 @@ class RecommendationEngine {
                         .thenBy { it.drama.publishedAt }
                         .thenBy { it.drama.id },
                 )
+                val engaged = ordered.any { entry ->
+                    entry.watch?.let { it.completed || it.completion >= 0.2f } == true
+                }
                 SeriesGroup(
                     key = key,
                     episodes = ordered,
@@ -39,10 +43,11 @@ class RecommendationEngine {
                     publishedAt = ordered.maxOf { it.drama.publishedAt },
                     lastWatchedAt = ordered.maxOf { it.watch?.lastWatchedAt ?: 0L },
                     finished = ordered.all { it.watch?.completed == true },
+                    skippedAway = !engaged && ordered.maxOf { it.watch?.skipCount ?: 0 } >= 2,
                 )
             }
         val inProgress = series
-            .filter { it.lastWatchedAt > 0 && !it.finished }
+            .filter { it.lastWatchedAt > 0 && !it.finished && !it.skippedAway }
             .sortedByDescending { it.lastWatchedAt }
         val fresh = series
             .filter { it.lastWatchedAt == 0L && !it.finished }
@@ -51,10 +56,13 @@ class RecommendationEngine {
                     .thenByDescending { it.publishedAt }
                     .thenBy { it.key },
             )
+        val skipped = series
+            .filter { it.skippedAway && !it.finished }
+            .sortedBy { it.lastWatchedAt }
         val finished = series
             .filter { it.finished }
             .sortedBy { it.lastWatchedAt }
-        return (inProgress + fresh + finished).flatMap { group -> group.episodes.map { it.drama } }
+        return (inProgress + fresh + skipped + finished).flatMap { group -> group.episodes.map { it.drama } }
     }
 
     private data class SeriesGroup(
@@ -64,5 +72,6 @@ class RecommendationEngine {
         val publishedAt: Long,
         val lastWatchedAt: Long,
         val finished: Boolean,
+        val skippedAway: Boolean,
     )
 }

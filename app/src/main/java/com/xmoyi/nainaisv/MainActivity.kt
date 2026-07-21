@@ -3,7 +3,9 @@ package com.xmoyi.nainaisv
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
@@ -14,13 +16,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.media3.common.util.UnstableApi
 import com.xmoyi.nainaisv.caregiver.CaregiverScreen
 import com.xmoyi.nainaisv.player.GrandmaScreen
 import com.xmoyi.nainaisv.ui.theme.NaiNaiTheme
 import kotlinx.coroutines.launch
-import androidx.media3.common.util.UnstableApi
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
@@ -42,7 +48,23 @@ class MainActivity : ComponentActivity() {
                     if (!setupComplete) mode = ScreenMode.CAREGIVER
                 }
 
+                // 奶奶模式隐藏状态栏和导航栏，画面不被系统图标打扰；家属模式恢复正常。
+                LaunchedEffect(setupComplete, mode) {
+                    val controller = WindowCompat.getInsetsController(window, window.decorView)
+                    if (setupComplete && mode == ScreenMode.GRANDMA) {
+                        controller.systemBarsBehavior =
+                            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                        controller.hide(WindowInsetsCompat.Type.systemBars())
+                    } else {
+                        controller.show(WindowInsetsCompat.Type.systemBars())
+                    }
+                }
+
                 if (!setupComplete || mode == ScreenMode.CAREGIVER) {
+                    if (setupComplete) {
+                        // 家属页按返回键回到奶奶模式，而不是直接退出应用。
+                        BackHandler { mode = ScreenMode.GRANDMA }
+                    }
                     CaregiverScreen(
                         onboarding = !setupComplete,
                         onExit = { mode = ScreenMode.GRANDMA },
@@ -62,6 +84,7 @@ class MainActivity : ComponentActivity() {
                                 label = { Text(if (pinError) "PIN 不正确" else "输入家属 PIN") },
                                 isError = pinError,
                                 visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                                 singleLine = true,
                             )
                         },
