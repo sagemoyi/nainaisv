@@ -56,9 +56,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var startJob: Job? = null
     private var loadJob: Job? = null
     private var preloadJob: Job? = null
+    private var endedJob: Job? = null
     private val errorCounts = mutableMapOf<String, Int>()
     private var lastProgressSave = 0L
     private var contentChanged = false
+    private var pausedByUser = false
 
     init {
         slots.forEachIndexed { index, slot -> attachListener(index, slot) }
@@ -147,10 +149,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         when {
             slot.player.isPlaying -> {
                 slot.player.pause()
+                pausedByUser = true
                 saveCurrent(false)
             }
-            slot.expired() -> _state.value.current?.let { playAtId(it.id, forceReload = true) }
-            else -> slot.player.play()
+            slot.expired() -> {
+                pausedByUser = false
+                _state.value.current?.let { playAtId(it.id, forceReload = true) }
+            }
+            else -> {
+                pausedByUser = false
+                slot.player.play()
+            }
         }
     }
 
@@ -161,19 +170,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun resume() {
         val current = _state.value.current ?: return
+        // 奶奶自己点的暂停要一直保持，回到前台或家属改动后都不自动续播。
+        if (pausedByUser) return
         val slot = slots[activeSlot]
         if (slot.expired() && !slot.player.isPlaying) {
             playAtId(current.id, forceReload = true)
         } else {
             slot.player.play()
         }
-    }
-
-    fun retry() {
-        val current = _state.value.current ?: _state.value.queue.getOrNull(_state.value.currentIndex) ?: return
-        errorCounts.remove(current.id)
-        _state.value = _state.value.copy(errorMessage = null)
-        playAtId(current.id, forceReload = true)
     }
 
     fun dismissHint() {
@@ -232,6 +236,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (index !in queue.indices) return
         loadJob?.cancel()
         preloadJob?.cancel()
+        endedJob?.cancel()
         if (savePrevious) saveCurrent(skipped = slots[activeSlot].player.currentPosition < 15_000)
         val item = queue[index]
         loadJob = viewModelScope.launch {
@@ -329,6 +334,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (slotIndex != activeSlot) slots[activeSlot].player.pause()
         activeSlot = slotIndex
         val slot = slots[activeSlot]
+        pausedByUser = false
         slot.player.playWhenReady = true
         slot.player.play()
         val queue = _state.value.queue
@@ -375,7 +381,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     Player.STATE_READY -> slot.dramaId?.let(errorCounts::remove)
                     Player.STATE_ENDED -> {
                         saveCurrent(false)
-                        viewModelScope.launch {
+                        endedJob?.cancel()
+                        endedJob = viewModelScope.launch {
                             delay(800)
                             next()
                         }

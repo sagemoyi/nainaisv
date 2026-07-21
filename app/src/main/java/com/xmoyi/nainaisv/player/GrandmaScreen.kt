@@ -1,9 +1,9 @@
 package com.xmoyi.nainaisv.player
 
 import android.app.Activity
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -27,7 +27,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PauseCircle
 import androidx.compose.material.icons.filled.PlayCircle
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -38,6 +37,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -63,6 +63,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.xmoyi.nainaisv.data.DramaEntity
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -80,6 +81,9 @@ fun GrandmaScreen(
     val activity = context as? Activity
     val lifecycleOwner = LocalLifecycleOwner.current
     var lastBackAt by remember { mutableLongStateOf(0L) }
+    var showExitPrompt by remember { mutableStateOf(false) }
+    var infoVisible by remember { mutableStateOf(true) }
+    var initialPageApplied by remember { mutableStateOf(false) }
     val pagerState = rememberPagerState(initialPage = state.currentIndex) { state.queue.size }
 
     LaunchedEffect(Unit) {
@@ -92,11 +96,33 @@ fun GrandmaScreen(
             .collect(viewModel::onPageSelected)
     }
     LaunchedEffect(state.currentIndex, state.queue.size) {
-        if (state.queue.isNotEmpty() &&
-            pagerState.currentPage != state.currentIndex &&
-            !pagerState.isScrollInProgress
-        ) {
+        if (state.queue.isEmpty()) return@LaunchedEffect
+        if (!initialPageApplied) {
+            // 冷启动直接落到上次看到的位置，不滑动经过中间的剧集。
+            initialPageApplied = true
+            if (pagerState.currentPage != state.currentIndex) pagerState.scrollToPage(state.currentIndex)
+        } else if (pagerState.currentPage != state.currentIndex && !pagerState.isScrollInProgress) {
             pagerState.animateScrollToPage(state.currentIndex)
+        }
+    }
+    // 标题和作者只在切换剧集或暂停时出现几秒，不长期挡住画面和字幕。
+    LaunchedEffect(state.currentIndex, state.isPlaying) {
+        infoVisible = true
+        if (state.isPlaying) {
+            delay(4_000)
+            infoVisible = false
+        }
+    }
+    LaunchedEffect(state.showHint) {
+        if (state.showHint) {
+            delay(6_000)
+            viewModel.dismissHint()
+        }
+    }
+    LaunchedEffect(showExitPrompt) {
+        if (showExitPrompt) {
+            delay(2_000)
+            showExitPrompt = false
         }
     }
     DisposableEffect(lifecycleOwner) {
@@ -118,7 +144,7 @@ fun GrandmaScreen(
             activity?.finish()
         } else {
             lastBackAt = now
-            Toast.makeText(context, "再按一次退出", Toast.LENGTH_SHORT).show()
+            showExitPrompt = true
         }
     }
 
@@ -134,6 +160,7 @@ fun GrandmaScreen(
                     DramaPage(
                         item = item,
                         isCurrent = page == state.currentIndex,
+                        infoVisible = infoVisible,
                         state = state,
                         onTap = {
                             viewModel.togglePlayback()
@@ -169,22 +196,36 @@ fun GrandmaScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(Icons.Default.PauseCircle, contentDescription = null, tint = Color.White, modifier = Modifier.size(46.dp))
-                Text("点一下暂停或继续", color = Color.White, fontSize = 20.sp)
-                Text("上滑换一个故事", color = Color.White, fontSize = 20.sp)
+                Text("点一下暂停或继续", color = Color.White, fontSize = 22.sp)
+                Text("上滑看下一个", color = Color.White, fontSize = 22.sp)
+                Text("下滑回到上一个", color = Color.White, fontSize = 22.sp)
             }
         }
 
         state.errorMessage?.let { message ->
-            Column(
+            Box(
                 Modifier
                     .align(Alignment.Center)
+                    .padding(horizontal = 32.dp)
                     .background(Color.Black.copy(alpha = 0.8f), RoundedCornerShape(20.dp))
-                    .padding(28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                    .padding(horizontal = 24.dp, vertical = 18.dp),
             ) {
                 Text(message, color = Color.White, fontSize = 22.sp)
-                Button(onClick = viewModel::retry) { Text("再试一次", fontSize = 20.sp) }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = showExitPrompt,
+            modifier = Modifier.align(Alignment.Center),
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            Box(
+                Modifier
+                    .background(Color.Black.copy(alpha = 0.78f), MaterialTheme.shapes.large)
+                    .padding(horizontal = 28.dp, vertical = 18.dp),
+            ) {
+                Text("再按一次退出", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -219,6 +260,7 @@ fun GrandmaScreen(
 private fun DramaPage(
     item: DramaEntity,
     isCurrent: Boolean,
+    infoVisible: Boolean,
     state: PlayerUiState,
     onTap: () -> Unit,
 ) {
@@ -261,51 +303,57 @@ private fun DramaPage(
             )
         }
 
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(240.dp)
-                .align(Alignment.BottomCenter)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f)),
-                    ),
-                ),
-        )
-
-        Column(
-            Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 30.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+        // 标题和作者：非当前页一直显示方便预览；当前页播放几秒后自动淡出，不挡画面。
+        AnimatedVisibility(
+            visible = !isCurrent || infoVisible,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn(),
+            exit = fadeOut(),
         ) {
-            Text(
-                item.seriesTitle.ifBlank { item.title },
-                color = Color.White,
-                fontSize = 26.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                if (isCurrent && state.episodeLabel != null) {
-                    Text(state.episodeLabel, color = Color.White, fontSize = 19.sp)
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f)),
+                        ),
+                    )
+                    .padding(start = 20.dp, end = 20.dp, top = 56.dp, bottom = 26.dp),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        item.seriesTitle.ifBlank { item.title },
+                        color = Color.White,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        if (isCurrent && state.episodeLabel != null) {
+                            Text(state.episodeLabel, color = Color.White, fontSize = 19.sp)
+                        }
+                        Text(item.ownerName, color = Color.White.copy(alpha = 0.75f), fontSize = 19.sp)
+                    }
                 }
-                Text(item.ownerName, color = Color.White.copy(alpha = 0.75f), fontSize = 19.sp)
             }
-            if (isCurrent) {
-                LinearProgressIndicator(
-                    progress = {
-                        if (state.durationMs > 0) {
-                            (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f)
-                        } else 0f
-                    },
-                    modifier = Modifier.fillMaxWidth().height(6.dp),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = Color.White.copy(alpha = 0.25f),
-                )
-            }
+        }
+
+        // 细进度条一直贴在页面底部，标题淡出后奶奶仍能看到播放进度。
+        if (isCurrent) {
+            LinearProgressIndicator(
+                progress = {
+                    if (state.durationMs > 0) {
+                        (state.positionMs.toFloat() / state.durationMs).coerceIn(0f, 1f)
+                    } else 0f
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .align(Alignment.BottomCenter),
+                color = Color.White.copy(alpha = 0.85f),
+                trackColor = Color.White.copy(alpha = 0.2f),
+            )
         }
     }
 }
